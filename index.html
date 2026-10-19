@@ -58,10 +58,20 @@
     top: calc(var(--top) / 2 - 83.3333dvh);
     height: 166.6667dvh;
     object-fit: cover;
-    filter: blur(2.4px); /* light 10% blur (glass panels use 24px); display only, sampling reads raw frames */
+    filter: blur(2.88px); /* light blur (12% of the glass panels' 24px); display only, sampling reads raw frames */
     opacity: 0; transition: opacity .5s ease;
   }
   #video.live { opacity: 1; }
+  /* Frosted glass over the camera feed: soft milky tint + fine ice grain */
+  #frost {
+    position: absolute; inset: 0; pointer-events: none;
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+      linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.06));
+    background-size: 160px 160px, 100% 100%;
+    mix-blend-mode: soft-light;
+    opacity: .9;
+  }
 
   /* ---------- Top third: view only, no interaction ---------- */
   #lockzone {
@@ -221,7 +231,7 @@
 </style>
 </head>
 <body>
-  <div id="stage"><video id="video" playsinline muted autoplay></video></div>
+  <div id="stage"><video id="video" playsinline muted autoplay></video><div id="frost"></div></div>
 
   <!-- Top third: deliberately non-interactive -->
   <div id="lockzone" aria-hidden="true">
@@ -886,7 +896,7 @@
       keepAwake();
       ui.mainLabel.textContent = 'Calibrate white';
       ui.hint.textContent = state.cal
-        ? 'Using saved calibration. Re-calibrate if the lighting changed.'
+        ? 'Using saved calibration. Re-calibrate if the lighting has changed.'
         : 'Place the lens over a white reference and tap Calibrate.';
       if (!state.hasTorch) toast('Flashlight not available on this browser', 2600);
     } catch (e) {
