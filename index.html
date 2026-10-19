@@ -1,0 +1,845 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Surface Eyedropper</title>
+<style>
+  :root {
+    --ink: #ffffff;
+    --ink-2: rgba(255, 255, 255, .68);
+    --glass-tint: rgba(255, 255, 255, .10);
+    --glass-tint-2: rgba(255, 255, 255, .03);
+    --glass-edge: rgba(255, 255, 255, .34);
+    --glass-hi: rgba(255, 255, 255, .65);
+    --shadow: rgba(0, 0, 0, .30);
+    --ok: #5df2a0;
+    --warn: #ffd166;
+    --bad: #ff6b6b;
+    --swatch: rgb(40, 40, 46);
+    --top: 33.3333dvh;
+  }
+  /* Bright scene behind the glass: switch to dark ink + whiter glass, like adaptive liquid glass */
+  body.bright {
+    --ink: #0d0d12;
+    --ink-2: rgba(13, 13, 18, .62);
+    --glass-tint: rgba(255, 255, 255, .30);
+    --glass-tint-2: rgba(255, 255, 255, .12);
+    --glass-edge: rgba(255, 255, 255, .7);
+    --shadow: rgba(0, 0, 0, .16);
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: #000;
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    -webkit-user-select: none;
+    overscroll-behavior: none;
+    transition: color .4s ease;
+  }
+  button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; }
+
+  /* ---------- Camera layer (full screen, sits under all UI) ---------- */
+  #stage {
+    position: fixed; inset: 0; overflow: hidden;
+    background: radial-gradient(120% 80% at 50% 20%, #2b2f3a 0%, #0c0d12 60%, #000 100%);
+  }
+  /* Element is 166.67dvh tall and centred on the middle of the top third,
+     so the centre of the camera frame (where we sample) lands in the clear zone. */
+  #video {
+    position: absolute; left: 0; width: 100%;
+    top: calc(var(--top) / 2 - 83.3333dvh);
+    height: 166.6667dvh;
+    object-fit: cover;
+    opacity: 0; transition: opacity .5s ease;
+  }
+  #video.live { opacity: 1; }
+
+  /* ---------- Top third: view only, no interaction ---------- */
+  #lockzone {
+    position: fixed; left: 0; right: 0; top: 0; height: var(--top);
+    z-index: 5; touch-action: none;
+    display: grid; place-items: center;
+    padding-top: env(safe-area-inset-top);
+  }
+  #reticle {
+    position: absolute; left: 50%; top: 50%;
+    width: 120px; height: 120px; transform: translate(-50%, -50%);
+    border-radius: 26px;
+    box-shadow: 0 0 0 1.5px rgba(255,255,255,.9), 0 0 0 9999px rgba(0,0,0,.18), 0 0 24px rgba(0,0,0,.35) inset;
+    transition: box-shadow .25s ease, width .3s ease, height .3s ease;
+  }
+  #reticle::before, #reticle::after {
+    content: ""; position: absolute; left: 50%; top: 50%; background: rgba(255,255,255,.85);
+    transform: translate(-50%, -50%); border-radius: 1px;
+  }
+  #reticle::before { width: 14px; height: 1.5px; }
+  #reticle::after { width: 1.5px; height: 14px; }
+  #reticle.clip { box-shadow: 0 0 0 2px var(--bad), 0 0 0 9999px rgba(0,0,0,.18), 0 0 24px rgba(255,80,80,.35) inset; }
+  #reticle.cal { box-shadow: 0 0 0 2px var(--warn), 0 0 0 9999px rgba(0,0,0,.18), 0 0 24px rgba(255,210,100,.35) inset; animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { transform: translate(-50%, -50%) scale(1.06); } }
+  #zoneLabel {
+    position: absolute; bottom: 10px; left: 0; right: 0; text-align: center;
+    font-size: 12px; letter-spacing: .08em; text-transform: uppercase; font-weight: 600;
+    color: rgba(255,255,255,.85); text-shadow: 0 1px 6px rgba(0,0,0,.7);
+  }
+
+  /* ---------- Liquid glass ---------- */
+  .glass {
+    position: relative; isolation: isolate;
+    border-radius: 30px;
+    background: linear-gradient(145deg, var(--glass-tint) 0%, var(--glass-tint-2) 100%);
+    -webkit-backdrop-filter: blur(24px) saturate(185%) brightness(1.04);
+    backdrop-filter: blur(24px) saturate(185%) brightness(1.04);
+    border: 1px solid transparent;
+    box-shadow:
+      inset 0 1px 1px var(--glass-hi),
+      inset 0 -1px 1px rgba(255,255,255,.14),
+      inset 0 0 0 1px rgba(255,255,255,.06),
+      inset 0 0 26px rgba(255,255,255,.07),
+      0 14px 38px var(--shadow);
+    transition: background .4s ease, box-shadow .4s ease;
+  }
+  /* Gradient rim: bright at top-left / bottom-right like light catching curved glass */
+  .glass::before {
+    content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; z-index: -1;
+    background: linear-gradient(135deg, var(--glass-edge), rgba(255,255,255,.05) 38%, rgba(255,255,255,.04) 62%, var(--glass-edge));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    pointer-events: none;
+  }
+  /* Specular sheen */
+  .glass::after {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(120% 60% at 20% -10%, rgba(255,255,255,.28), transparent 55%),
+      radial-gradient(80% 50% at 110% 120%, rgba(255,255,255,.12), transparent 60%);
+    mix-blend-mode: soft-light;
+  }
+  .pressable { transition: transform .18s cubic-bezier(.3,.7,.4,1.4), filter .2s ease; }
+  .pressable:active { transform: scale(.94); filter: brightness(1.15); }
+
+  /* ---------- Bottom two thirds ---------- */
+  #ui {
+    position: fixed; left: 0; right: 0; bottom: 0; top: var(--top); z-index: 10;
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 14px max(16px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    max-width: 560px; margin: 0 auto;
+  }
+
+  .result {
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 14px;
+    padding: 18px;
+  }
+  .result-top { display: flex; gap: 16px; align-items: stretch; }
+  .swatch {
+    flex: 0 0 auto; width: clamp(88px, 28vw, 132px); aspect-ratio: 1; border-radius: 24px;
+    background: var(--swatch);
+    box-shadow: inset 0 1px 1px rgba(255,255,255,.45), inset 0 -10px 24px rgba(0,0,0,.18), 0 8px 24px rgba(0,0,0,.25), 0 0 0 1px rgba(255,255,255,.25);
+    transition: background .15s linear;
+    position: relative; overflow: hidden;
+  }
+  .swatch::after { /* glossy cap */
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,0) 32%);
+  }
+  .swatch .held {
+    position: absolute; right: 8px; bottom: 8px; z-index: 1;
+    font-size: 10px; font-weight: 700; letter-spacing: .08em; padding: 3px 7px; border-radius: 99px;
+    background: rgba(0,0,0,.45); color: #fff; display: none;
+  }
+  body.holding .swatch .held { display: block; }
+  .readout { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: space-between; }
+  .eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+  .channels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .ch { display: flex; flex-direction: column; }
+  .ch span { font-size: 12px; font-weight: 700; color: var(--ink-2); }
+  .ch b { font-size: clamp(26px, 8.5vw, 38px); font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.05; }
+  .ch.r span { color: #ff7a7a; } .ch.g span { color: #6be59b; } .ch.b span { color: #7ab8ff; }
+  body.bright .ch.r span { color: #c62828; } body.bright .ch.g span { color: #1b8a4a; } body.bright .ch.b span { color: #1f5fbf; }
+
+  .chips { display: grid; grid-template-columns: 1.5fr 1fr; gap: 10px; }
+  .chip {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    height: 50px; border-radius: 18px; padding: 0 12px;
+    font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
+    border-radius: 18px;
+  }
+  .chip svg { flex: 0 0 auto; width: 17px; height: 17px; opacity: .8; }
+  .hint { font-size: 13px; color: var(--ink-2); line-height: 1.35; min-height: 1.35em; text-align: center; }
+
+  .status { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .pill { border-radius: 20px; padding: 10px 12px; min-width: 0; text-align: left; }
+  .pill .k { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+  .pill .v { font-size: 14px; font-weight: 650; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-2); flex: 0 0 auto; box-shadow: 0 0 8px currentColor; }
+  .dot.ok { background: var(--ok); color: var(--ok); }
+  .dot.warn { background: var(--warn); color: var(--warn); }
+  .dot.bad { background: var(--bad); color: var(--bad); }
+  .meter { height: 4px; border-radius: 4px; margin-top: 7px; background: rgba(127,127,127,.28); overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 0%; border-radius: inherit; background: linear-gradient(90deg, #ffe08a, #fff6d8); transition: width .3s ease; }
+
+  .controls { display: flex; gap: 12px; align-items: center; }
+  .btn-main {
+    flex: 1; height: 64px; border-radius: 32px;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    font-size: 17px; font-weight: 650;
+  }
+  .btn-main svg { width: 22px; height: 22px; }
+  .btn-round { flex: 0 0 auto; width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; }
+  .btn-round svg { width: 24px; height: 24px; }
+  .btn-round.on { background: linear-gradient(145deg, rgba(255,236,170,.55), rgba(255,214,102,.25)); }
+  .btn-round[disabled], .btn-main[disabled] { opacity: .45; pointer-events: none; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: calc(100px + env(safe-area-inset-bottom)); z-index: 30;
+    transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
+    padding: 12px 18px; border-radius: 99px; font-size: 15px; font-weight: 600; white-space: nowrap;
+    transition: opacity .25s ease, transform .35s cubic-bezier(.3,.7,.4,1.3);
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  @media (max-height: 640px) {
+    .result { padding: 14px; gap: 10px; }
+    .chip { height: 44px; }
+    .btn-main, .btn-round { height: 56px; }
+    .btn-round { width: 56px; }
+    .hint { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage"><video id="video" playsinline muted autoplay></video></div>
+
+  <!-- Top third: deliberately non-interactive -->
+  <div id="lockzone" aria-hidden="true">
+    <div id="reticle"></div>
+    <div id="zoneLabel">Sampling area</div>
+  </div>
+
+  <main id="ui">
+    <section class="glass result">
+      <div class="result-top">
+        <div class="swatch" id="swatch"><span class="held">HOLD</span></div>
+        <div class="readout">
+          <div class="eyebrow" id="eyebrow">Average color</div>
+          <div class="channels">
+            <div class="ch r"><span>R</span><b id="vr">—</b></div>
+            <div class="ch g"><span>G</span><b id="vg">—</b></div>
+            <div class="ch b"><span>B</span><b id="vb">—</b></div>
+          </div>
+        </div>
+      </div>
+      <div class="chips">
+        <button class="glass chip pressable" id="copyRgb" aria-label="Copy RGB">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="3"/><path d="M5 15V6a3 3 0 0 1 3-3h7"/></svg>
+          <span id="rgbText">rgb(—, —, —)</span>
+        </button>
+        <button class="glass chip pressable" id="copyHex" aria-label="Copy hex">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="3"/><path d="M5 15V6a3 3 0 0 1 3-3h7"/></svg>
+          <span id="hexText">#——————</span>
+        </button>
+      </div>
+      <div class="hint" id="hint">Tap Start, then hold the lens 1–3 cm above the surface.</div>
+    </section>
+
+    <section class="status">
+      <div class="glass pill">
+        <div class="k">Light</div>
+        <div class="v" id="lightV">—</div>
+        <div class="meter"><i id="lightMeter"></i></div>
+      </div>
+      <div class="glass pill">
+        <div class="k">Exposure</div>
+        <div class="v"><span class="dot" id="expDot"></span><span id="expV">—</span></div>
+      </div>
+      <button class="glass pill pressable" id="wbPill" aria-label="White balance status">
+        <div class="k">White bal.</div>
+        <div class="v"><span class="dot" id="wbDot"></span><span id="wbV">Not set</span></div>
+      </button>
+    </section>
+
+    <section class="controls">
+      <button class="glass btn-round pressable" id="holdBtn" aria-label="Hold reading" disabled>
+        <svg id="holdIcon" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>
+      </button>
+      <button class="glass btn-main pressable" id="mainBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3.5"/></svg>
+        <span id="mainLabel">Start camera</span>
+      </button>
+      <button class="glass btn-round pressable" id="torchBtn" aria-label="Toggle flashlight" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 2h10v4l-2 4v11a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V10L7 6z"/><path d="M7 6h10M12 13v2"/></svg>
+      </button>
+    </section>
+  </main>
+
+  <div id="toast" class="glass"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- helpers ----------
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const S2L = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const c = i / 255;
+    S2L[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+  const lin2srgb = (v) => {
+    v = clamp(v, 0, 1);
+    return v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+  };
+  const to8 = (v) => Math.round(lin2srgb(v) * 255);
+  const hex2 = (n) => n.toString(16).padStart(2, '0').toUpperCase();
+
+  // ---------- elements ----------
+  const video = $('video');
+  const reticle = $('reticle');
+  const ui = {
+    swatch: $('swatch'), vr: $('vr'), vg: $('vg'), vb: $('vb'),
+    rgbText: $('rgbText'), hexText: $('hexText'), hint: $('hint'), eyebrow: $('eyebrow'),
+    lightV: $('lightV'), lightMeter: $('lightMeter'),
+    expDot: $('expDot'), expV: $('expV'), wbDot: $('wbDot'), wbV: $('wbV'),
+    mainBtn: $('mainBtn'), mainLabel: $('mainLabel'), holdBtn: $('holdBtn'), torchBtn: $('torchBtn'),
+    holdIcon: $('holdIcon'), toast: $('toast'),
+  };
+
+  // ---------- state ----------
+  const SAMPLE_FRACTION = 0.18; // side of the sampled square, as a fraction of the frame's short side
+  const SAMPLE_PX = 48;
+  const CLIP_LEVEL = 250;
+
+  const state = {
+    stream: null, track: null, caps: {}, running: false, demo: false,
+    holding: false, torchOn: false, hasTorch: false,
+    knob: null,               // the light/exposure control being tuned
+    applying: false,
+    exposure: 'idle',         // ok | adjusting | bright | dark
+    okStreak: 0,
+    rawLin: [0, 0, 0],        // instantaneous linear mean of the sample (uncorrected)
+    peak: 0, clip: 0,         // raw stats used by the auto tuner
+    out: null,                // smoothed corrected linear color
+    shown: [0, 0, 0],
+    collectors: [],
+    cal: loadCal(),
+    calibrating: false,
+    expLocked: false,
+  };
+
+  const sampleCanvas = document.createElement('canvas');
+  sampleCanvas.width = sampleCanvas.height = SAMPLE_PX;
+  const sctx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+  const bgCanvas = document.createElement('canvas');
+  bgCanvas.width = bgCanvas.height = 8;
+  const bctx = bgCanvas.getContext('2d', { willReadFrequently: true });
+
+  // ---------- top third is inaccessible ----------
+  const lz = $('lockzone');
+  ['touchstart', 'touchmove', 'touchend', 'pointerdown', 'pointerup', 'click', 'dblclick', 'contextmenu', 'wheel']
+    .forEach((ev) => lz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); }, { passive: false }));
+  // Block pinch-zoom / double-tap zoom anywhere
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  let lastTouch = 0;
+  document.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTouch < 300) e.preventDefault();
+    lastTouch = now;
+  }, { passive: false });
+
+  // ---------- toast ----------
+  let toastTimer;
+  function toast(msg, ms = 1800) {
+    ui.toast.textContent = msg;
+    ui.toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => ui.toast.classList.remove('show'), ms);
+  }
+
+  // ---------- calibration persistence ----------
+  function loadCal() {
+    try {
+      const c = JSON.parse(localStorage.getItem('eyedropper.cal') || 'null');
+      if (c && Array.isArray(c.gains) && c.gains.length === 3 && c.gains.every((g) => g > 0 && isFinite(g))) return c;
+    } catch (e) { /* storage unavailable */ }
+    return null;
+  }
+  function saveCal(c) {
+    try {
+      if (c) localStorage.setItem('eyedropper.cal', JSON.stringify(c));
+      else localStorage.removeItem('eyedropper.cal');
+    } catch (e) { /* storage unavailable */ }
+  }
+
+  // ---------- camera ----------
+  async function openStream(constraints) {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: constraints });
+    const track = stream.getVideoTracks()[0];
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    await new Promise((r) => (video.readyState >= 2 ? r() : video.addEventListener('loadeddata', r, { once: true })));
+    await sleep(350); // some Android builds only report full capabilities after the first frames
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    return { stream, track, caps };
+  }
+  const stopStream = (s) => s && s.getTracks().forEach((t) => t.stop());
+
+  async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error(window.isSecureContext ? 'Camera API not available in this browser.' : 'Camera needs HTTPS. Open this page over https://');
+    }
+    const base = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } };
+    let cam = await openStream({ ...base, facingMode: { ideal: 'environment' } });
+
+    // Phones with several rear lenses: the torch is often only exposed on one of them.
+    if (!cam.caps.torch) {
+      const firstId = cam.track.getSettings().deviceId;
+      const devices = (await navigator.mediaDevices.enumerateDevices())
+        .filter((d) => d.kind === 'videoinput' && d.deviceId && d.deviceId !== firstId && !/front|user|face/i.test(d.label));
+      for (const d of devices) {
+        if (cam) stopStream(cam.stream);
+        try {
+          const alt = await openStream({ ...base, deviceId: { exact: d.deviceId } });
+          if (alt.caps.torch) { cam = alt; break; }
+          stopStream(alt.stream);
+        } catch (e) { /* try next */ }
+        cam = null;
+      }
+      if (!cam) cam = await openStream({ ...base, facingMode: { ideal: 'environment' } });
+    }
+
+    Object.assign(state, { stream: cam.stream, track: cam.track, caps: cam.caps, demo: false });
+    state.hasTorch = !!cam.caps.torch;
+    await setupHardware();
+  }
+
+  function constrain(c) {
+    if (state.demo) { Object.assign(demo.settings, c); return Promise.resolve(); }
+    // Re-assert torch with every change; some devices drop it otherwise.
+    const adv = { ...c };
+    if (state.hasTorch && !('torch' in adv) && state.knob?.type !== 'torch') adv.torch = state.torchOn;
+    return state.track.applyConstraints({ advanced: [adv] });
+  }
+
+  async function setTorch(on) {
+    state.torchOn = on;
+    if (!state.hasTorch) return;
+    try {
+      if (state.knob?.type === 'torch') await constrain({ torch: on ? state.knob.value : 0 });
+      else await constrain({ torch: on });
+    } catch (e) { console.warn('torch', e); }
+    renderStatus();
+  }
+
+  async function setupHardware() {
+    const c = state.caps;
+    let s = state.track.getSettings ? state.track.getSettings() : {};
+
+    // 1) Light on.
+    if (state.hasTorch) await setTorch(true);
+    await sleep(400);
+
+    // 2) Fix white balance so the camera's AWB doesn't "neutralise" coloured surfaces.
+    if (Array.isArray(c.whiteBalanceMode) && c.whiteBalanceMode.includes('manual') && c.colorTemperature) {
+      try {
+        await constrain({ whiteBalanceMode: 'manual', colorTemperature: clamp(5200, c.colorTemperature.min, c.colorTemperature.max) });
+      } catch (e) { console.warn('wb lock', e); }
+    }
+
+    // 3) Pick the light/exposure knob the auto-tuner will drive.
+    s = state.track.getSettings ? state.track.getSettings() : {};
+    state.knob = null;
+    state.expLocked = false;
+    if (c.torch && typeof c.torch === 'object' && c.torch.max > c.torch.min) {
+      // Variable-intensity torch (exposed as a numeric range on some devices/browsers)
+      state.knob = { type: 'torch', min: c.torch.min, max: c.torch.max, step: c.torch.step || 0, value: c.torch.max, log: false };
+      state.expLocked = Array.isArray(c.exposureMode) && c.exposureMode.includes('manual');
+      if (state.expLocked && c.exposureTime) {
+        try { await constrain({ exposureMode: 'manual', exposureTime: clamp(s.exposureTime || 100, c.exposureTime.min, c.exposureTime.max) }); } catch (e) { state.expLocked = false; }
+      }
+    } else if (c.exposureTime && Array.isArray(c.exposureMode) && c.exposureMode.includes('manual')) {
+      // Manual exposure: lets us dim the *effective* torch intensity reaching the sensor
+      const min = c.exposureTime.min;
+      const max = min < 330 ? Math.min(c.exposureTime.max, 330) : c.exposureTime.max; // cap ~33 ms (keeps 30 fps)
+      const value = clamp(s.exposureTime || (min + max) / 4, min, max);
+      state.knob = { type: 'time', min, max, step: c.exposureTime.step || 0, value, log: true };
+      const extra = {};
+      if (c.iso) extra.iso = clamp(s.iso || 100, c.iso.min, c.iso.max);
+      try {
+        await constrain({ exposureMode: 'manual', exposureTime: value, ...extra });
+        state.expLocked = true;
+      } catch (e) {
+        console.warn('manual exposure', e);
+        state.knob = null;
+      }
+    }
+    if (!state.knob && c.exposureCompensation && c.exposureCompensation.max > c.exposureCompensation.min) {
+      state.knob = {
+        type: 'ev', min: c.exposureCompensation.min, max: c.exposureCompensation.max,
+        step: c.exposureCompensation.step || 0, value: s.exposureCompensation || 0, log: false,
+      };
+    }
+    renderStatus();
+  }
+
+  // ---------- demo source (no camera / desktop preview: open with ?demo) ----------
+  const demo = { settings: { exposureTime: 200 }, canvas: null, hue: 20 };
+  async function startDemo() {
+    const cv = document.createElement('canvas');
+    cv.width = 720; cv.height = 1280;
+    const ctx = cv.getContext('2d');
+    demo.canvas = cv;
+    const draw = (t) => {
+      // A paper-like surface whose colour slowly drifts; brightness scales with the simulated exposure
+      const gain = (demo.settings.exposureTime / 200) * (state.torchOn ? 1 : 0.25);
+      const h = (20 + t / 200) % 360;
+      ctx.filter = 'none';
+      ctx.fillStyle = `hsl(${h} 55% ${clamp(48 * gain, 2, 100)}%)`;
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      const g = ctx.createRadialGradient(360, 640, 40, 360, 640, 760);
+      g.addColorStop(0, `rgba(255,255,255,${0.25 * gain})`);
+      g.addColorStop(1, 'rgba(0,0,0,0.55)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      for (let i = 0; i < 40; i++) { // fibres / texture
+        ctx.fillStyle = `rgba(${i % 2 ? 255 : 0},${i % 2 ? 255 : 0},${i % 2 ? 255 : 0},0.04)`;
+        ctx.fillRect((i * 97 + t / 30) % 720, 0, 3 + (i % 5), 1280);
+      }
+      if (state.demo) requestAnimationFrame(draw);
+    };
+    state.demo = true;
+    requestAnimationFrame(draw);
+    const stream = cv.captureStream(30);
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    await new Promise((r) => (video.readyState >= 2 ? r() : video.addEventListener('loadeddata', r, { once: true })));
+    Object.assign(state, { stream, track: stream.getVideoTracks()[0], caps: {}, hasTorch: true, torchOn: true, expLocked: true });
+    state.knob = { type: 'time', min: 10, max: 400, step: 0, value: 200, log: true };
+  }
+
+  // ---------- frame sampling ----------
+  function layoutReticle() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return;
+    const r = video.getBoundingClientRect();
+    const scale = Math.max(r.width / vw, r.height / vh); // object-fit: cover
+    const side = Math.min(vw, vh) * SAMPLE_FRACTION * scale;
+    reticle.style.width = reticle.style.height = `${Math.round(side)}px`;
+  }
+  window.addEventListener('resize', layoutReticle);
+
+  let lastBg = 0, lastUi = 0;
+  function processFrame(now) {
+    if (!state.running) return;
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (vw && vh) {
+      const side = Math.round(Math.min(vw, vh) * SAMPLE_FRACTION);
+      sctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, SAMPLE_PX, SAMPLE_PX);
+      const d = sctx.getImageData(0, 0, SAMPLE_PX, SAMPLE_PX).data;
+      let r = 0, g = 0, b = 0, clipped = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const R = d[i], G = d[i + 1], B = d[i + 2];
+        r += S2L[R]; g += S2L[G]; b += S2L[B];
+        if (R >= CLIP_LEVEL || G >= CLIP_LEVEL || B >= CLIP_LEVEL) clipped++;
+      }
+      const n = d.length / 4;
+      const raw = [r / n, g / n, b / n];
+      state.rawLin = raw;
+      state.clip = clipped / n;
+      state.peak = lin2srgb(Math.max(...raw)) * 255;
+
+      for (const c of state.collectors) c.push(raw, state.clip);
+
+      // Corrected colour = raw × white-balance gains × exposure compensation since calibration
+      const gains = state.cal ? state.cal.gains : [1, 1, 1];
+      const k = exposureRatio();
+      const corr = raw.map((v, i) => v * gains[i] * k);
+      if (!state.out) state.out = corr;
+      else state.out = state.out.map((v, i) => v + (corr[i] - v) * 0.22);
+
+      if (now - lastUi > 80 && !state.holding) {
+        lastUi = now;
+        renderColor(state.out.map(to8));
+      }
+      if (now - lastBg > 500) {
+        lastBg = now;
+        bctx.drawImage(video, 0, 0, 8, 8);
+        const bd = bctx.getImageData(0, 0, 8, 8).data;
+        let L = 0;
+        for (let i = 0; i < bd.length; i += 4) L += 0.2126 * S2L[bd[i]] + 0.7152 * S2L[bd[i + 1]] + 0.0722 * S2L[bd[i + 2]];
+        L /= bd.length / 4;
+        document.body.classList.toggle('bright', L > 0.42);
+      }
+      reticle.classList.toggle('clip', state.clip > 0.02 && !state.calibrating);
+    }
+    schedule();
+  }
+  function schedule() {
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback((now) => processFrame(now));
+    else requestAnimationFrame(processFrame);
+  }
+
+  // How much brighter/darker the sensor is exposed now vs. at calibration time
+  function exposureRatio() {
+    const cal = state.cal, k = state.knob;
+    if (!cal || !k || cal.knobType !== k.type || !cal.knobValue) return 1;
+    if (k.type === 'ev') return Math.pow(2, cal.knobValue - k.value);
+    if (!k.value) return 1;
+    return cal.knobValue / k.value;
+  }
+
+  // ---------- auto light / exposure tuner ----------
+  function snap(v, k) {
+    v = clamp(v, k.min, k.max);
+    if (k.step > 0) v = k.min + Math.round((v - k.min) / k.step) * k.step;
+    return clamp(v, k.min, k.max);
+  }
+  async function setKnob(v) {
+    const k = state.knob;
+    v = snap(v, k);
+    if (Math.abs(v - k.value) < 1e-9) return false;
+    state.applying = true;
+    try {
+      if (k.type === 'torch') { if (state.torchOn) await constrain({ torch: v }); }
+      else if (k.type === 'time') await constrain({ exposureMode: 'manual', exposureTime: v });
+      else if (k.type === 'ev') await constrain({ exposureCompensation: v });
+      k.value = v;
+    } catch (e) {
+      console.warn('knob', e);
+    }
+    await sleep(160); // let a couple of frames through at the new setting
+    state.applying = false;
+    return true;
+  }
+
+  async function tune() {
+    if (!state.running || state.applying) return;
+    const { peak, clip } = state;
+    const k = state.knob;
+    let dir = 0, f = 1;
+    if (clip > 0.01 || peak > 242) { dir = -1; f = clip > 0.15 || peak > 252 ? 0.55 : 0.8; }
+    else if (peak < 150 && clip < 0.002) { dir = 1; f = peak < 70 ? 1.8 : 1.18; }
+
+    if (!dir) { state.exposure = 'ok'; state.okStreak++; renderStatus(); return; }
+    state.okStreak = 0;
+    if (!k) { state.exposure = dir < 0 ? 'bright' : 'dark'; renderStatus(); return; }
+
+    let next;
+    if (k.type === 'ev') next = k.value + Math.log2(f) * 1.0;
+    else if (k.log) next = k.value * f;
+    else next = k.value + (f - 1) * (k.max - k.min) * 0.5;
+    const moved = await setKnob(next);
+    state.exposure = moved ? 'adjusting' : (dir < 0 ? 'bright' : 'dark');
+    renderStatus();
+  }
+  setInterval(tune, 260);
+
+  function lightLevel() {
+    const k = state.knob;
+    if (!state.torchOn && state.hasTorch) return 0;
+    if (!k) return state.torchOn ? 1 : 0;
+    if (k.log && k.min > 0) return (Math.log(k.value) - Math.log(k.min)) / (Math.log(k.max) - Math.log(k.min));
+    return (k.value - k.min) / (k.max - k.min);
+  }
+
+  // ---------- calibration ----------
+  function collectFrames(n) {
+    return new Promise((resolve) => {
+      const sum = [0, 0, 0];
+      let count = 0, clipSum = 0;
+      const c = {
+        push(raw, clip) {
+          sum[0] += raw[0]; sum[1] += raw[1]; sum[2] += raw[2]; clipSum += clip; count++;
+          if (count >= n) {
+            state.collectors = state.collectors.filter((x) => x !== c);
+            resolve({ avg: sum.map((v) => v / count), clip: clipSum / count });
+          }
+        },
+      };
+      state.collectors.push(c);
+    });
+  }
+
+  async function calibrate() {
+    if (!state.running || state.calibrating) return;
+    state.calibrating = true;
+    reticle.classList.add('cal');
+    ui.mainBtn.disabled = true;
+    ui.hint.textContent = 'Hold steady over the white reference…';
+    if (state.hasTorch && !state.torchOn) await setTorch(true);
+    try {
+      // Let the light/exposure tuner settle on the white target (bright but not clipping)
+      const t0 = performance.now();
+      state.okStreak = 0;
+      while (state.okStreak < 3 && performance.now() - t0 < 5000) await sleep(100);
+      while (state.applying) await sleep(30);
+
+      const { avg, clip } = await collectFrames(24);
+      const maxC = Math.max(...avg);
+      if (clip > 0.05) throw new Error('Overexposed — lift the phone a little and retry.');
+      if (maxC < 0.04) throw new Error('Too dark — cover the reference with the light on.');
+      const minC = Math.min(...avg);
+      if (minC / maxC < 0.35) throw new Error('That doesn’t look white. Use a white reference.');
+
+      state.cal = {
+        gains: avg.map((v) => 1 / v), // white → (1,1,1) → rgb(255,255,255)
+        knobType: state.knob ? state.knob.type : null,
+        knobValue: state.knob ? state.knob.value : null,
+        locked: state.expLocked,
+        at: Date.now(),
+      };
+      saveCal(state.cal);
+      state.out = null;
+      toast('Calibrated to white ✓');
+      ui.hint.textContent = state.expLocked
+        ? 'Calibrated. Readings are relative to your white reference.'
+        : 'Calibrated. This camera can’t lock exposure, so brightness may drift.';
+    } catch (e) {
+      toast(e.message, 2600);
+      ui.hint.textContent = e.message;
+    } finally {
+      state.calibrating = false;
+      reticle.classList.remove('cal');
+      ui.mainBtn.disabled = false;
+      renderStatus();
+    }
+  }
+
+  // ---------- rendering ----------
+  function renderColor([r, g, b]) {
+    state.shown = [r, g, b];
+    ui.vr.textContent = r; ui.vg.textContent = g; ui.vb.textContent = b;
+    ui.rgbText.textContent = `rgb(${r}, ${g}, ${b})`;
+    ui.hexText.textContent = `#${hex2(r)}${hex2(g)}${hex2(b)}`;
+    ui.swatch.style.setProperty('--swatch', `rgb(${r}, ${g}, ${b})`);
+  }
+
+  function renderStatus() {
+    const lvl = clamp(lightLevel(), 0, 1);
+    ui.lightMeter.style.width = `${Math.round(lvl * 100)}%`;
+    if (!state.running) ui.lightV.textContent = '—';
+    else if (state.hasTorch && !state.torchOn) ui.lightV.textContent = 'Off';
+    else if (!state.hasTorch) ui.lightV.textContent = 'No torch';
+    else ui.lightV.textContent = `${Math.round(lvl * 100)}%`;
+
+    const exp = {
+      idle: ['', '—'], ok: ['ok', 'Good'], adjusting: ['warn', 'Tuning'],
+      bright: ['bad', 'Too bright'], dark: ['warn', 'Too dark'],
+    }[state.running ? state.exposure : 'idle'];
+    ui.expDot.className = `dot ${exp[0]}`;
+    ui.expV.textContent = exp[1];
+
+    if (state.calibrating) { ui.wbDot.className = 'dot warn'; ui.wbV.textContent = 'Calibrating'; }
+    else if (state.cal) { ui.wbDot.className = 'dot ok'; ui.wbV.textContent = 'White ✓'; }
+    else { ui.wbDot.className = 'dot'; ui.wbV.textContent = 'Not set'; }
+
+    ui.torchBtn.classList.toggle('on', state.torchOn);
+    ui.torchBtn.disabled = !state.running || !state.hasTorch;
+    ui.holdBtn.disabled = !state.running;
+    ui.eyebrow.textContent = state.cal ? 'Average color · calibrated' : 'Average color · raw';
+  }
+
+  // ---------- actions ----------
+  async function copyText(text) {
+    if (!state.running && !state.holding) return;
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+      ta.remove();
+    }
+    if (navigator.vibrate) navigator.vibrate(12);
+    toast(ok ? `Copied ${text}` : 'Copy failed');
+  }
+
+  $('copyRgb').addEventListener('click', () => copyText(ui.rgbText.textContent));
+  $('copyHex').addEventListener('click', () => copyText(ui.hexText.textContent));
+
+  ui.holdBtn.addEventListener('click', () => {
+    state.holding = !state.holding;
+    document.body.classList.toggle('holding', state.holding);
+    ui.holdIcon.innerHTML = state.holding
+      ? '<path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5z"/>'
+      : '<rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/>';
+    ui.holdBtn.setAttribute('aria-label', state.holding ? 'Resume live reading' : 'Hold reading');
+  });
+
+  ui.torchBtn.addEventListener('click', async () => {
+    await setTorch(!state.torchOn);
+    if (!state.torchOn && state.cal) toast('Calibration assumes the light is on', 2200);
+  });
+
+  $('wbPill').addEventListener('click', () => {
+    if (!state.cal || state.calibrating) return;
+    if (confirm('Clear white-balance calibration?')) {
+      state.cal = null; saveCal(null); state.out = null;
+      ui.hint.textContent = 'Calibration cleared. Showing raw camera color.';
+      renderStatus();
+    }
+  });
+
+  let wakeLock = null;
+  async function keepAwake() {
+    try { wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) { /* optional */ }
+  }
+
+  ui.mainBtn.addEventListener('click', async () => {
+    if (state.running) return calibrate();
+    ui.mainBtn.disabled = true;
+    ui.mainLabel.textContent = 'Starting…';
+    try {
+      if (new URLSearchParams(location.search).has('demo')) await startDemo();
+      else await startCamera();
+      state.running = true;
+      state.out = null;
+      video.classList.add('live');
+      layoutReticle();
+      schedule();
+      keepAwake();
+      ui.mainLabel.textContent = 'Calibrate white';
+      ui.hint.textContent = state.cal
+        ? 'Using saved calibration. Re-calibrate if the lighting changed.'
+        : 'Place the lens over a white reference and tap Calibrate.';
+      if (!state.hasTorch) toast('Flashlight not available on this browser', 2600);
+    } catch (e) {
+      console.error(e);
+      ui.mainLabel.textContent = 'Start camera';
+      ui.hint.textContent = e.name === 'NotAllowedError' ? 'Camera permission denied.' : (e.message || 'Could not start the camera.');
+    } finally {
+      ui.mainBtn.disabled = false;
+      renderStatus();
+    }
+  });
+
+  // Release camera + torch when the app is backgrounded
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state.running && !state.demo) {
+      state.running = false;
+      stopStream(state.stream);
+      state.torchOn = false;
+      video.classList.remove('live');
+      ui.mainLabel.textContent = 'Start camera';
+      ui.hint.textContent = 'Camera paused. Tap Start to resume.';
+      wakeLock?.release?.().catch(() => {});
+      renderStatus();
+    }
+  });
+
+  if (state.cal) ui.hint.textContent = 'Saved calibration found. Tap Start.';
+  renderStatus();
+})();
+</script>
+</body>
+</html>
