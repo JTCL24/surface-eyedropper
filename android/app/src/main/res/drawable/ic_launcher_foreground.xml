@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Glass tile with a colour drop -->
+    <path android:fillColor="#33FFFFFF" android:strokeColor="#AAFFFFFF" android:strokeWidth="1.5"
+        android:pathData="M42,32h24a10,10 0 0 1 10,10v24a10,10 0 0 1 -10,10h-24a10,10 0 0 1 -10,-10v-24a10,10 0 0 1 10,-10z" />
+    <path android:fillColor="#FFB347"
+        android:pathData="M54,40c0,0 -10,11.5 -10,18a10,10 0 0 0 20,0c0,-6.5 -10,-18 -10,-18z" />
+    <path android:fillColor="#66FFFFFF"
+        android:pathData="M49,58a5,5 0 0 0 3,4.6a1.2,1.2 0 0 1 -1,2.2a7.5,7.5 0 0 1 -4.5,-6.8a1.25,1.25 0 0 1 2.5,0z" />
+</vector>
